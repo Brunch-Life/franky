@@ -1,0 +1,208 @@
+name: Publish fork wheels
+
+on:
+  push:
+    branches:
+      - "wheel-builds-*"
+  workflow_dispatch:
+    inputs:
+      libfranka-version:
+        description: "libfranka version to bundle, or 'all'"
+        required: true
+        default: "all"
+        type: string
+      release-tag:
+        description: "Release tag to create or update when building one version; leave empty to use wheels-libfranka-<version>"
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build-one:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.libfranka-version != 'all' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        manylinux-version: [manylinux_2_28_x86_64, manylinux_2_34_x86_64]
+    uses: ./.github/workflows/build_wheels.yml
+    with:
+      libfranka-version: ${{ inputs.libfranka-version }}
+      manylinux-version: ${{ matrix.manylinux-version }}
+
+  build-all:
+    if: ${{ github.event_name == 'push' || inputs.libfranka-version == 'all' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        libfranka-version: [0.7.1, 0.8.0, 0.9.2, 0.12.1, 0.13.3, 0.14.2, 0.17.0, 0.18.0]
+        manylinux-version: [manylinux_2_28_x86_64, manylinux_2_34_x86_64]
+    uses: ./.github/workflows/build_wheels.yml
+    with:
+      libfranka-version: ${{ matrix.libfranka-version }}
+      manylinux-version: ${{ matrix.manylinux-version }}
+
+  release-one:
+    needs: build-one
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.libfranka-version != 'all' }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    env:
+      LIBFRANKA_VERSION: ${{ inputs.libfranka-version }}
+      RELEASE_TAG: ${{ inputs.release-tag || format('wheels-libfranka-{0}', inputs.libfranka-version) }}
+
+    steps:
+      - name: Download wheel archives
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+
+          mkdir -p release/dist release/archive
+
+          for archive in artifacts/wheels___${LIBFRANKA_VERSION}___*/*.zip; do
+            echo "Unpacking ${archive}"
+            unzip -q -o "${archive}" -d release
+          done
+
+          wheel_count=$(find release/dist -name '*.whl' | wc -l)
+          if [[ "${wheel_count}" -eq 0 ]]; then
+            echo "No wheels were found."
+            exit 1
+          fi
+
+          (
+            cd release
+            zip -qr "archive/franky-control-libfranka-${LIBFRANKA_VERSION}-wheelhouse.zip" dist
+          )
+
+          {
+            echo '<!doctype html><html><body>'
+            find release/dist -name '*.whl' -printf '%f\n' | sort | while read -r wheel; do
+              echo "<a href=\"${wheel}\">${wheel}</a><br>"
+            done
+            echo '</body></html>'
+          } > release/index.html
+
+          cat > release/notes.md <<EOF
+          Wheels for franky-control, built from this fork.
+
+          These wheels bundle libfranka ${LIBFRANKA_VERSION}.
+
+          Install from the release wheel index:
+
+          python -m pip install --find-links https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/index.html franky-control
+          uv pip install --find-links https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/index.html franky-control
+
+          You can also install by using the direct URL for the wheel matching your Python version and Linux platform.
+
+          The wheelhouse.zip asset is included for manual download, but pip install <wheelhouse.zip URL> is not expected to work directly.
+          EOF
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: franky-control wheels for libfranka ${{ env.LIBFRANKA_VERSION }}
+          prerelease: ${{ inputs.prerelease }}
+          body_path: release/notes.md
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          make_latest: false
+          files: |
+            release/dist/*.whl
+            release/archive/*.zip
+            release/index.html
+
+  release-all:
+    needs: build-all
+    if: ${{ github.event_name == 'push' || inputs.libfranka-version == 'all' }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        libfranka-version: [0.7.1, 0.8.0, 0.9.2, 0.12.1, 0.13.3, 0.14.2, 0.17.0, 0.18.0]
+
+    env:
+      LIBFRANKA_VERSION: ${{ matrix.libfranka-version }}
+      RELEASE_TAG: wheels-libfranka-${{ matrix.libfranka-version }}
+
+    steps:
+      - name: Download wheel archives
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+
+          mkdir -p release/dist release/archive
+
+          for archive in artifacts/wheels___${LIBFRANKA_VERSION}___*/*.zip; do
+            echo "Unpacking ${archive}"
+            unzip -q -o "${archive}" -d release
+          done
+
+          wheel_count=$(find release/dist -name '*.whl' | wc -l)
+          if [[ "${wheel_count}" -eq 0 ]]; then
+            echo "No wheels were found."
+            exit 1
+          fi
+
+          (
+            cd release
+            zip -qr "archive/franky-control-libfranka-${LIBFRANKA_VERSION}-wheelhouse.zip" dist
+          )
+
+          {
+            echo '<!doctype html><html><body>'
+            find release/dist -name '*.whl' -printf '%f\n' | sort | while read -r wheel; do
+              echo "<a href=\"${wheel}\">${wheel}</a><br>"
+            done
+            echo '</body></html>'
+          } > release/index.html
+
+          cat > release/notes.md <<EOF
+          Wheels for franky-control, built from this fork.
+
+          These wheels bundle libfranka ${LIBFRANKA_VERSION}.
+
+          Install from the release wheel index:
+
+          python -m pip install --find-links https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/index.html franky-control
+          uv pip install --find-links https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/index.html franky-control
+
+          You can also install by using the direct URL for the wheel matching your Python version and Linux platform.
+
+          The wheelhouse.zip asset is included for manual download, but pip install <wheelhouse.zip URL> is not expected to work directly.
+          EOF
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: franky-control wheels for libfranka ${{ env.LIBFRANKA_VERSION }}
+          prerelease: ${{ github.event_name == 'push' || inputs.prerelease }}
+          body_path: release/notes.md
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          make_latest: false
+          files: |
+            release/dist/*.whl
+            release/archive/*.zip
+            release/index.html
