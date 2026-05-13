@@ -1,0 +1,129 @@
+name: Release wheels (fork)
+
+# Build franky-control wheels for libfranka versions missing from the upstream
+# nickswalker/franky release set, and publish them as per-version GitHub Releases
+# in the same layout (`wheels-libfranka-<ver>`) so `pip install --find-links` works.
+#
+# Trigger manually:
+#   gh workflow run release_wheels.yml --ref enhance-impedance-control
+#
+# To add more libfranka versions, edit the matrix below.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        libfranka-version: ["0.15.0", "0.19.0"]
+        manylinux-version: [manylinux_2_28_x86_64, manylinux_2_34_x86_64]
+    uses: ./.github/workflows/build_wheels.yml
+    with:
+      libfranka-version: ${{ matrix.libfranka-version }}
+      manylinux-version: ${{ matrix.manylinux-version }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout (for VERSION)
+        uses: actions/checkout@v4
+
+      - name: Prepare dirs
+        run: |
+          mkdir -p artifacts staging
+
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Read package version
+        id: pkg
+        run: |
+          version=$(cat VERSION | tr -d '[:space:]')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Group wheels per libfranka version and create releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PKG_VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          # find unique libfranka versions in artifact names: wheels___<libfranka>___<manylinux>
+          versions=$(
+            cd artifacts && \
+            ls -1d wheels___*___* 2>/dev/null \
+              | sed -E 's/wheels___([^_]+)___.*/\1/' \
+              | sort -u
+          )
+
+          if [[ -z "$versions" ]]; then
+            echo "::error::No wheel artifacts found"
+            exit 1
+          fi
+
+          for v in $versions; do
+            tag="wheels-libfranka-${v}"
+            title="franky-control wheels for libfranka ${v}"
+            workdir="staging/${v}"
+            rm -rf "$workdir" && mkdir -p "$workdir"
+
+            # unpack every output zip for this libfranka version into one flat dist dir
+            for z in artifacts/wheels___${v}___*/libfranka_*_wheels.zip; do
+              echo "Unpacking $z"
+              tmp=$(mktemp -d)
+              unzip -q "$z" -d "$tmp"
+              # original layout: <tmp>/dist/*.whl
+              mv "$tmp"/dist/*.whl "$workdir"/
+              rm -rf "$tmp"
+            done
+
+            # also build a wheelhouse zip mirroring upstream layout
+            wheelhouse="${workdir}/franky-control-libfranka-${v}-wheelhouse.zip"
+            (
+              cd "$workdir"
+              zip -qr "$(basename "$wheelhouse")" *.whl
+            )
+
+            # create or replace the release
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              echo "Release $tag already exists; deleting old assets and re-uploading"
+              gh release delete-asset "$tag" --yes --repo "$GITHUB_REPOSITORY" \
+                $(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | tr '\n' ' ') || true
+            else
+              notes=$(cat <<EOF
+          Wheels for **franky-control ${PKG_VERSION}**, built from this fork's \`enhance-impedance-control\` branch.
+
+          These wheels bundle **libfranka ${v}**.
+
+          Install:
+
+          \`\`\`
+          pip install --find-links https://github.com/${GITHUB_REPOSITORY}/releases/expanded_assets/${tag} franky-control
+          \`\`\`
+
+          This release was produced by \`.github/workflows/release_wheels.yml\` to cover libfranka versions not (yet) published by the upstream fork.
+          EOF
+          )
+              gh release create "$tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "$title" \
+                --prerelease \
+                --notes "$notes"
+            fi
+
+            # upload every .whl and the wheelhouse zip
+            gh release upload "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              "${workdir}"/*.whl "$wheelhouse"
+          done
