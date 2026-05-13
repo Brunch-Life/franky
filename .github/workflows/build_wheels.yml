@@ -26,6 +26,17 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Patch VERSION with libfranka local label
+        # Append a PEP 440 local-version label so the wheel produced here is
+        # distinguishable from the upstream franky-control 1.1.3 on PyPI.
+        # Without this, `pip install --find-links <our GH release> franky-control`
+        # may pick the upstream PyPI wheel instead, since the filenames collide.
+        run: |
+          base=$(tr -d '[:space:]' < VERSION)
+          libfranka_ver="${{ inputs.libfranka-version }}"
+          echo "${base}+impedance.libfranka.${libfranka_ver}" > VERSION
+          echo "Patched VERSION: $(cat VERSION)"
+
       - name: Install dependencies
         run: |
           yum -y install zip boost-devel urdfdom-devel fmt-devel gcc-c++ openssl-devel mysql-devel postgresql-devel tinyxml2-devel
